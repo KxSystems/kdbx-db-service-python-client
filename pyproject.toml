@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kdbx-db-service-client"
+version = "0.1.0"
+description = "Python client for the kdb-x db service (Service Gateway REST + qIPC)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+  { name = "KX" }
+]
+dependencies = [
+  "requests>=2.25",
+  "pykx>=4.0.0b5",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
