@@ -5,7 +5,7 @@ import math
 import re
 from typing import Any, Optional, List
 
-from .endpoints import rest_path
+from .endpoints import assembly_params, rest_path
 from .errors import DbServiceError
 
 REST_ACCEPT_JSON = "application/json"
@@ -40,7 +40,9 @@ def import_files(
     include: Optional[List[str]] = None,
     types: Optional[str] = None,
     postparse: Optional[dict[str, str]] = None,
+    assembly: Optional[str] = None,
 ) -> Any:
+    params = assembly_params(session, assembly)
     body = {"table": table, "path": path}
     if format is not None:
         body["format"] = format
@@ -65,6 +67,7 @@ def import_files(
             "POST",
             rest_path(session.options, "import_files"),
             json_body=body,
+            params=params,
             accept=_rest_accept(session),
         )
     return _qipc_call(session, "import_files", args=body)
@@ -77,12 +80,40 @@ def import_data(
     data: Any,
     createTable: Optional[bool] = None,
     columnNames: Optional[List[str]] = None,
-    columnTypes: Optional[str] = None,
+    types: Optional[str] = None,
     insert_as: str = "auto",
-    transport: str = "json",
+    transport: str = "auto",
+    assembly: Optional[str] = None,
 ) -> Any:
-    if transport not in ("json", "binary"):
-        raise DbServiceError("transport must be one of: 'json', 'binary'")
+    params = assembly_params(session, assembly)
+    if transport not in ("auto", "json", "binary"):
+        raise DbServiceError("transport must be one of: 'auto', 'json', 'binary'")
+    if transport == "auto":
+        transport = "binary" if _is_table_like(data) else "json"
+
+    if session.mode == "rest" and transport == "binary":
+        try:
+            body = _build_binary_import_data_payload(
+                table=table,
+                data=data,
+                createTable=createTable,
+                columnNames=columnNames,
+                types=types,
+                insert_as=insert_as,
+            )
+            raw = _encode_binary_payload(body)
+            return session._rest.request(
+                "POST",
+                rest_path(session.options, "import_data"),
+                body=raw,
+                params=params,
+                content_type="application/octet-stream",
+                accept=_rest_accept(session),
+            )
+        except DbServiceError:
+            # Best-effort fallback so default binary mode does not break
+            # unlicensed/non-PyKX environments.
+            transport = "json"
 
     normalized_data, normalized_column_names = _normalize_insert_data(data, columnNames, insert_as)
     final_column_names = columnNames or normalized_column_names
@@ -92,7 +123,7 @@ def import_data(
     body = {"table": table, "data": normalized_data}
     inferred_column_types = None
     if createTable:
-        if not columnTypes:
+        if not types:
             if final_column_names:
                 inferred_column_types = _infer_column_types(
                     source_data=data,
@@ -104,24 +135,16 @@ def import_data(
         body["createTable"] = createTable
     if final_column_names is not None:
         body["columnNames"] = final_column_names
-    if columnTypes is not None:
-        body["columnTypes"] = columnTypes
+    if types is not None:
+        body["types"] = types
     elif inferred_column_types is not None:
-        body["columnTypes"] = inferred_column_types
+        body["types"] = inferred_column_types
     if session.mode == "rest":
-        if transport == "binary":
-            raw = _encode_binary_payload(body)
-            return session._rest.request(
-                "POST",
-                rest_path(session.options, "import_data"),
-                body=raw,
-                content_type="application/octet-stream",
-                accept=_rest_accept(session),
-            )
         return session._rest.request(
             "POST",
             rest_path(session.options, "import_data"),
             json_body=body,
+            params=params,
             accept=_rest_accept(session),
         )
     return _qipc_call(session, "import_data", args=body)
@@ -130,31 +153,38 @@ def import_data(
 def import_database(
     session,
     *,
-    table: str,
     path: str,
+    table: Optional[str] = None,
+    assembly: Optional[str] = None,
 ) -> Any:
-    body = {"table": table, "path": path}
+    params = assembly_params(session, assembly)
+    body = {"path": path}
+    if table is not None:
+        body["table"] = table
     if session.mode == "rest":
         return session._rest.request(
             "POST",
             rest_path(session.options, "import_database"),
             json_body=body,
+            params=params,
             accept=_rest_accept(session),
         )
     return _qipc_call(session, "import_database", args=body)
 
 
-def get_import(session, *, job_id: str) -> Any:
+def get_import(session, *, job_id: str, assembly: Optional[str] = None) -> Any:
+    params = assembly_params(session, assembly)
     if session.mode == "rest":
         path = rest_path(session.options, "get_import", jobId=job_id)
-        return session._rest.request("GET", path, accept=_rest_accept(session))
+        return session._rest.request("GET", path, params=params, accept=_rest_accept(session))
     return _qipc_call(session, "get_import", args={"sessionId": job_id})
 
 
-def cancel_import(session, *, job_id: str) -> Any:
+def cancel_import(session, *, job_id: str, assembly: Optional[str] = None) -> Any:
+    params = assembly_params(session, assembly)
     if session.mode == "rest":
         path = rest_path(session.options, "cancel_import", jobId=job_id)
-        return session._rest.request("DELETE", path, accept=_rest_accept(session))
+        return session._rest.request("DELETE", path, params=params, accept=_rest_accept(session))
     return _qipc_call(session, "cancel_import", args={"sessionId": job_id})
 
 
@@ -183,6 +213,61 @@ def _encode_binary_payload(payload: dict) -> bytes:
         return bytes(raw)
     except Exception as e:
         raise DbServiceError("Failed to serialize import_data payload as binary.") from e
+
+
+def _build_binary_import_data_payload(
+    *,
+    table: str,
+    data: Any,
+    createTable: Optional[bool],
+    columnNames: Optional[List[str]],
+    types: Optional[str],
+    insert_as: str,
+) -> dict:
+    body = {"table": table}
+
+    # For binary transport, keep table-like inputs in columnar form when possible.
+    # This avoids forcing table inputs through row-oriented Python normalization first.
+    if _is_pandas_like(data):
+        # Keep pandas table-like inputs in native form for binary transport.
+        # This avoids forcing an intermediate columnar-dict shape.
+        data_payload = data
+    elif _is_pykx_table_like(data):
+        # Keep PyKX table-like inputs in native form for binary transport.
+        # This avoids an unnecessary PyKX -> pandas conversion.
+        data_payload = data
+    else:
+        # Non-table-like payloads keep existing behavior.
+        normalized_data, normalized_column_names = _normalize_insert_data(data, columnNames, insert_as)
+        data_payload = normalized_data
+        if columnNames is None and normalized_column_names is not None:
+            columnNames = normalized_column_names
+
+    body["data"] = data_payload
+
+    if createTable is not None:
+        body["createTable"] = createTable
+    if columnNames is not None:
+        body["columnNames"] = columnNames
+    if types is not None:
+        body["types"] = types
+    return body
+
+
+def _is_table_like(data: Any) -> bool:
+    return _is_pandas_like(data) or _is_pykx_table_like(data)
+
+
+def _is_pandas_like(data: Any) -> bool:
+    return _pd is not None and isinstance(data, _pd.DataFrame)
+
+
+def _is_pykx_table_like(data: Any) -> bool:
+    pykx_table_names = {"Table", "KeyedTable", "SplayedTable", "PartitionedTable"}
+    return any(
+        base.__module__.startswith("pykx.") and base.__name__ in pykx_table_names
+        for base in type(data).__mro__
+    )
 
 
 def _infer_column_types(source_data: Any, column_names: List[str], normalized_data: list) -> str:
@@ -327,13 +412,11 @@ def _normalize_insert_data(
     # PyKX table (or compatible object with .pd())
     if hasattr(data, "pd") and callable(getattr(data, "pd")):
         try:
-            pdf = data.pd()
+            records, cols = _pykx_to_records(data)
             if insert_as == "objects":
-                records = pdf.to_dict(orient="records")
-                return _normalize_records(records), column_names
-            cols = list(pdf.columns)
-            rows = pdf.values.tolist()
-            return _normalize_rows(rows), column_names or cols
+                return _normalize_records(records), (column_names or cols)
+            rows = [[row.get(col) for col in cols] for row in records]
+            return _normalize_rows(rows), (column_names or cols)
         except Exception as e:
             raise DbServiceError("Failed to normalize PyKX input for import_data") from e
 
@@ -432,6 +515,32 @@ def _normalize_cell_value(value: Any, where: str) -> Any:
             return _ns_to_timespan(ns)
 
     return value
+
+
+def _pykx_to_records(obj: Any) -> tuple[list[dict], list[str]]:
+    # Prefer direct Python conversion from PyKX to avoid intermediate pandas objects.
+    py_obj = obj.py() if hasattr(obj, "py") and callable(getattr(obj, "py")) else None
+    if py_obj is None:
+        raise DbServiceError("PyKX object does not expose a Python conversion method.")
+
+    if isinstance(py_obj, dict):
+        cols = [str(c) for c in py_obj.keys()]
+        col_vals = [list(v) for v in py_obj.values()]
+        row_count = len(col_vals[0]) if col_vals else 0
+        rows = []
+        for i in range(row_count):
+            rows.append({cols[j]: col_vals[j][i] for j in range(len(cols))})
+        return rows, cols
+
+    if isinstance(py_obj, list):
+        if not py_obj:
+            return [], []
+        if isinstance(py_obj[0], dict):
+            cols = [str(c) for c in py_obj[0].keys()]
+            return py_obj, cols
+        raise DbServiceError("Unsupported PyKX list shape for table conversion.")
+
+    raise DbServiceError("Unsupported PyKX conversion output for table normalization.")
 
 
 def _is_null_like(value: Any) -> bool:

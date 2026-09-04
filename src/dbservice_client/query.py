@@ -111,6 +111,79 @@ def query_simple(
     return {"header": header, "payload": converted}
 
 
+def query_preview(
+    session,
+    *,
+    table: str,
+    startTS: Optional[Any] = None,
+    endTS: Optional[Any] = None,
+    limit: Optional[int] = None,
+    return_as: Optional[ReturnAs] = None,
+    unwrap: bool = True,
+) -> Any:
+    if return_as is None:
+        if session.mode == "rest":
+            return_as = "pykx" if bool(getattr(session, "pykx_licensed", False)) else "json"
+        else:
+            return_as = "pykx"
+    if return_as not in ("pykx", "pandas", "json"):
+        raise ValueError("return_as must be one of: 'pykx', 'pandas', 'json'")
+
+    payload = {"table": table}
+    if startTS is not None:
+        payload["startTS"] = startTS
+    if endTS is not None:
+        payload["endTS"] = endTS
+    if limit is not None:
+        payload["limit"] = limit
+
+    if session.mode == "rest":
+        if "startTS" in payload:
+            payload["startTS"] = _to_rest_timestamp(payload["startTS"])
+        if "endTS" in payload:
+            payload["endTS"] = _to_rest_timestamp(payload["endTS"])
+        path = rest_path(session.options, "query_preview")
+        if return_as == "pykx":
+            return _rest_query_binary(session, path=path, payload=payload, unwrap=unwrap)
+        resp = session._rest.request("POST", path, json_body=payload, accept="application/json")
+        if not unwrap:
+            return resp
+
+        payload_part = resp.get("payload") if isinstance(resp, dict) else resp
+
+        if return_as == "json":
+            return payload_part
+        if return_as == "pandas":
+            try:
+                import pandas as pd
+            except Exception as e:
+                raise DbServiceError("pandas is required for return_as='pandas'") from e
+            return json_to_dataframe(pd, payload_part)
+        raise DbServiceError("Unexpected return_as value")
+
+    # qIPC
+    try:
+        import pykx as kx
+    except Exception as e:
+        raise DbServiceError("pykx is required for qipc mode. Install it to use qIPC.") from e
+
+    args: Dict[str, Any] = dict(payload)
+    args["table"] = kx.SymbolAtom(table)
+    if startTS is not None:
+        args["startTS"] = kx.toq(parse_timestamp_like(startTS))
+    if endTS is not None:
+        args["endTS"] = kx.toq(parse_timestamp_like(endTS))
+
+    api = _lookup_qipc_api(session, "query_preview")
+    res = session._qipc.request(api, args=args)
+    header, table_obj = _split_qipc_response(res)
+    converted = _convert_result(table_obj, return_as)
+
+    if unwrap:
+        return converted
+    return {"header": header, "payload": converted}
+
+
 def query_sql(
     session,
     query: str,

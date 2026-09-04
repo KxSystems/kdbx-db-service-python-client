@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, List
 
-from .endpoints import rest_path
+from .endpoints import assembly_params, rest_path
 from .errors import DbServiceError
 
 REST_ACCEPT_JSON = "application/json"
@@ -26,7 +26,9 @@ def create_table(
     sortColsDisk: Optional[List[str]] = None,
     primaryKeys: Optional[List[str]] = None,
     columns: List[dict],
+    assembly: Optional[str] = None,
 ) -> Any:
+    params = assembly_params(session, assembly)
     payload = {"table": table, "columns": columns}
     if description is not None:
         payload["description"] = description
@@ -56,30 +58,39 @@ def create_table(
             "POST",
             path,
             json_body=body,
+            params=params,
             accept=_rest_accept(session),
         )
     api = _lookup_qipc_api(session, "create_table")
     return session._qipc.request(api, args=payload)
 
 
-def list_tables(session) -> Any:
+def list_tables(session, *, assembly: Optional[str] = None) -> Any:
+    params = assembly_params(session, assembly)
     if session.mode == "rest":
-        return session._rest.request("GET", rest_path(session.options, "list_tables"), accept=_rest_accept(session))
+        return session._rest.request(
+            "GET",
+            rest_path(session.options, "list_tables"),
+            params=params,
+            accept=_rest_accept(session),
+        )
     return _qipc_call(session, "list_tables")
 
 
-def describe_table(session, *, table: str) -> Any:
+def describe_table(session, *, table: str, assembly: Optional[str] = None) -> Any:
+    params = assembly_params(session, assembly)
     if session.mode == "rest":
         path = rest_path(session.options, "describe_table", table=table)
-        return session._rest.request("GET", path, accept=_rest_accept(session))
+        return session._rest.request("GET", path, params=params, accept=_rest_accept(session))
     api = _lookup_qipc_api(session, "describe_table")
     return session._qipc.request(api, args={"table": table})
 
 
-def drop_table(session, *, table: str) -> Any:
+def drop_table(session, *, table: str, assembly: Optional[str] = None) -> Any:
+    params = assembly_params(session, assembly)
     if session.mode == "rest":
         path = rest_path(session.options, "drop_table", table=table)
-        return session._rest.request("DELETE", path, accept=_rest_accept(session))
+        return session._rest.request("DELETE", path, params=params, accept=_rest_accept(session))
     api = _lookup_qipc_api(session, "drop_table")
     return session._qipc.request(api, args={"table": table})
 
