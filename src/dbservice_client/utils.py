@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date as _date, datetime as _datetime, time as _time
 from typing import Any
 
@@ -50,3 +51,42 @@ def json_to_dataframe(pd, payload_part):
         return pd.DataFrame.from_dict(payload_part)
 
     return pd.DataFrame([payload_part])
+
+
+def to_json_serializable(value: Any) -> Any:
+    """Convert timestamp-like REST payload values before JSON encoding.
+
+    Converts datetime/date/time and NumPy datetime64 values to strings,
+    pandas/NumPy missing timestamps to None, and recurses into dict/list/tuple values.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+
+    value_type = type(value)
+    value_module = value_type.__module__
+    value_name = value_type.__name__
+
+    if value_name == "NaTType" and value_module.startswith("pandas."):
+        return None
+
+    if value_module == "numpy" and value_name == "datetime64":
+        value_as_text = str(value)
+        return None if value_as_text == "NaT" else value_as_text
+
+    if isinstance(value, _datetime):
+        return value.isoformat()
+
+    if isinstance(value, (_date, _time)):
+        return value.isoformat()
+
+    if isinstance(value, Mapping):
+        return {key: to_json_serializable(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [to_json_serializable(item) for item in value]
+
+    if value_module == "numpy" and hasattr(value, "item"):
+        return to_json_serializable(value.item())
+
+    return value
+

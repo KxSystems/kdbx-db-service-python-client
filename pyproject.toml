@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "kdbx-db-service-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python client for the kdb-x db service (Service Gateway REST + qIPC)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary" }
+license = "LicenseRef-Proprietary"
 authors = [
   { name = "KX" }
 ]

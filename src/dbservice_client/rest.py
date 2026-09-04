@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Union
 import requests
 
 from .errors import DbServiceConnectionError, DbServiceError
+from .utils import to_json_serializable
 
 
 class RestClient:
@@ -41,6 +42,7 @@ class RestClient:
         *,
         json_body: Optional[dict] = None,
         body: Optional[Union[str, bytes]] = None,
+        params: Optional[dict] = None,
         headers: Optional[dict] = None,
         content_type: Optional[str] = None,
         timeout: Optional[Union[int, float]] = None,
@@ -69,8 +71,9 @@ class RestClient:
             resp = self.http.request(
                 method=method.upper(),
                 url=url,
-                json=json_body,
+                json=to_json_serializable(json_body),
                 data=body if json_body is None else None,
+                params=params,
                 headers=merged_headers,
                 timeout=timeout,
             )

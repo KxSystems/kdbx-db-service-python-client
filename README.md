@@ -37,9 +37,27 @@ session = dbs.Session()
 rest_session = dbs.Session(endpoint="localhost:8080")
 ```
 
+### Selecting an assembly
+
+Table, import, delete and configuration export calls are routed to an assembly with the
+`assembly` query parameter. A service configured with a single assembly routes there by default, so
+`assembly` only needs to be given when more than one assembly is configured. Set it once
+for the session, or per call to override the session default:
+
+```python
+# Route every table, import, delete and configuration export call in this session to 'fxdb'
+session = dbs.Session(assembly="fxdb")
+
+# Route a single call elsewhere
+session.list_tables(assembly="ratesdb")
+```
+
+Query calls (`query_simple`, `query_sql`, `query_q`, `query_preview`) do not take an
+assembly.
+
 ### Examples
 
-This section shows common DB Service Python client workflows, including table management, data import, querying, and deleting tables.
+This section shows common DB Service Python client workflows, including table management, data import, querying, configuration export, deleting data, and deleting tables.
 
 #### Managing Tables
 Use these calls to define and inspect table schemas in DB Service. 
@@ -80,7 +98,7 @@ DB Service supports both `file-based` and `in-memory` ingest. Any file you want 
 job = session.import_files(table="fxquote", path="fxquote.csv.gz")
 
 # Check the status of the above import job
-session.get_import(job_id=job["name"])
+session.get_import(job_id=job["jobId"])
 
 # Import a parquet file into the existing 'fxquote' table
 session.import_files(table='fxquote', path='fxquote.parquet')
@@ -95,9 +113,12 @@ session.import_files(table="instruments", path="instruments.csv", createTable=Tr
 session.import_database(table="fxquote", path="fxquote-hdb")
 ```
 
-###### Import JSON
+###### Import Data
 
-Users can import data directly from Python without file staging
+Users can import data directly from Python without file staging. By default,
+pandas DataFrames and PyKX table-like data use binary REST transport, while
+plain Python row/object payloads use JSON. Pass `transport="json"` or
+`transport="binary"` to force a specific transport.
 
 ```python
 # Objects payload imported to 'instruments' table
@@ -148,9 +169,84 @@ session.query_q(
     query='select o:first bid,h:max bid,l:min bid,c:last bid by trddate,sym from fxquote',
     return_as="pandas",
 )
+
+# Preview (lightweight table sample)
+session.query_preview(
+    table="fxquote",
+    limit=5,
+    return_as="json",
+)
 ```
 
 > **Return format:** `return_as` may be `json`, `pandas`, or `pykx`. If omitted, it defaults to `json`.
+
+#### Exporting Configuration
+Export the active assembly configuration as YAML, for single-node DB Service deployments.
+
+```python
+# Return the assembly YAML as a string
+assembly_yaml = session.export_assembly()
+print(assembly_yaml)
+
+# Save the assembly YAML to a file
+session.export_assembly(filename="assembly.yaml")
+
+# Export a specific assembly's configuration
+session.export_assembly(assembly="ratesdb")
+```
+
+#### Deleting Data
+Delete rows from a table over an optional time window and filter. Deletion is asynchronous: `delete_rows` returns a pending job, and the final outcome is read back with `get_delete`.
+
+```python
+# Delete matching rows within a time window
+job = session.delete_rows(
+    table="fxquote",
+    startTS="2026.03.02D00:00:00.000",
+    endTS="2026.03.03D00:00:00.000",
+    filter=[["=", "sym", "EURUSD"]],
+)
+
+# Check the status of the above delete job
+session.get_delete(job["jobId"])
+
+# Delete every row in the time window
+session.delete_rows(
+    table="fxquote",
+    startTS="2026.03.02D00:00:00.000",
+    endTS="2026.03.03D00:00:00.000",
+    filter=[],
+)
+
+# Delete from a specific assembly
+session.delete_rows(
+    table="fxquote",
+    startTS="2026.03.02D00:00:00.000",
+    endTS="2026.03.03D00:00:00.000",
+    filter=[["=", "sym", "EURUSD"]],
+    assembly="ratesdb",
+)
+
+# Clear a delete job's tracked status
+session.cancel_delete(job["jobId"])
+```
+
+> **`filter` is mandatory.** Pass `filter=[]` to delete every row in the window. The
+> explicit empty list is a safety catch, so a filter left off by accident can never widen
+> a delete.
+
+> **Omitting `startTS`/`endTS` deletes the whole table.** The window defaults to all of
+> time, so bound it unless you intend to remove every row. `startTS` is inclusive and
+> `endTS` is exclusive.
+
+> **Timestamps are wall-clock.** `startTS`, `endTS` and any timestamp inside `filter`
+> accept q literals or timezone-naive `datetime` objects. An aware `datetime` is rejected
+> rather than silently shifted, because the delete API has no `inputTZ` field to carry the
+> offset. Convert first, e.g. `ts.astimezone(timezone.utc).replace(tzinfo=None)`.
+
+> **`cancel_delete` does not roll back.** It only clears the job's tracked status. A delete
+> already applying to disk runs to completion.
+
 #### Deleting Tables
 ```python
 # List tables (expected: 'fxquote' and 'instruments')
